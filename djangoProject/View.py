@@ -11,6 +11,9 @@ from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import AllowAny
 from rest_framework.authtoken.models import Token
 from rest_framework.authentication import TokenAuthentication
+from django.http import JsonResponse
+from django.core import serializers
+from .models import StorageArea
 
 @require_POST
 @csrf_exempt
@@ -63,3 +66,14 @@ def login_view(request):
             return JsonResponse({'token': str(token)}, status=200)  # Return the token
         else:
             return JsonResponse({'error': 'Invalid username or password'}, status=401)
+
+
+
+
+@csrf_exempt
+@api_view(['GET'])
+def get_storage_area_data(request, node_id):
+    sample_data = Sample.objects.filter(node_id=node_id).values('sensor_type','value' )  # get temperature and humidity for the given node_id
+    sample_data_list = list(sample_data)  # convert queryset to list of dictionaries
+    print(sample_data_list)
+    return JsonResponse(sample_data_list, safe=False)  # return JSON response
