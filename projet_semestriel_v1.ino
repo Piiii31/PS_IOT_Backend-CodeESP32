@@ -9,6 +9,9 @@
 #include <BLE2902.h>
 #include <EEPROM.h>
 #include <ESP.h>
+#include <AsyncWebSocket.h>
+#include <AsyncTCP.h>
+#include <ESPmDNS.h>
 
 const int EEPROM_SIZE = 512; // Define the size of EEPROM
 
@@ -29,7 +32,11 @@ String token; // Variable to store the token
 
 DHT dht(DHTPIN, DHTTYPE);
 
+AsyncWebServer server(80);
+AsyncWebSocket ws("/ws");
 WiFiClient client;
+
+bool newDataWritten = false;
 
 struct SensorSample
 {
@@ -55,6 +62,7 @@ class MyServerCallbacks : public BLEServerCallbacks
   void onConnect(BLEServer *pServer)
   {
     deviceConnected = true;
+    pServer->startAdvertising();
   };
 
   void onDisconnect(BLEServer *pServer)
@@ -117,7 +125,7 @@ class MyCallbacks : public BLECharacteristicCallbacks {
       EEPROM.put(132, username);
       EEPROM.put(164, userPassword);
       EEPROM.commit();
-
+      newDataWritten = true;
       Serial.println("Parameters saved to EEPROM");
 
       // Print the parameters
@@ -127,9 +135,15 @@ class MyCallbacks : public BLECharacteristicCallbacks {
     Serial.println("Server Port: " + String(serverPort));
     Serial.println("Username: " + String(username));
     Serial.println("User Password: " + String(userPassword));
-      ESP.restart();
+    
+    
+    
     }
+
+
+    
   }
+  
 };
 
 void loginToServer() {
@@ -225,13 +239,17 @@ void sendDataToServer(SensorSample &sample) {
       while (client.available()) {
         Serial.write(client.read());
       }
-
+      sendWebSocketMessage("Success");
       client.stop();
+      
     } else {
       Serial.println("Connection to server failed");
+      sendWebSocketMessage("Failed");
+      
     }
   } else {
     Serial.println("Not logged in. Data not sent.");
+    sendWebSocketMessage("Failed");
   }
 }
 
@@ -260,30 +278,69 @@ void setup() {
 
   // Check if parameters are empty
   
-    // Parameters are empty, initialize Bluetooth
-    BLEDevice::init("ESP32");
-    pServer = BLEDevice::createServer();
-    pServer->setCallbacks(new MyServerCallbacks());
-    BLEService *pService = pServer->createService(SERVICE_UUID);
-    pCharacteristic = pService->createCharacteristic(
-        CHARACTERISTIC_UUID,
-        BLECharacteristic::PROPERTY_READ |
-            BLECharacteristic::PROPERTY_WRITE);
-    pCharacteristic->setCallbacks(new MyCallbacks());
-    pService->start();
-    BLEAdvertising *pAdvertising = pServer->getAdvertising();
-    pAdvertising->start();
+    BLEDevice::init("A1");
+
+  // Create the BLE Server
+  pServer = BLEDevice::createServer();
+  pServer->setCallbacks(new MyServerCallbacks());
+
+  // Create the BLE Service
+  BLEService *pService = pServer->createService(SERVICE_UUID);
+
+  // Create a BLE Characteristic
+  pCharacteristic = pService->createCharacteristic(
+                      CHARACTERISTIC_UUID,
+                      BLECharacteristic::PROPERTY_READ   |
+                      BLECharacteristic::PROPERTY_WRITE  |
+                      BLECharacteristic::PROPERTY_NOTIFY |
+                      BLECharacteristic::PROPERTY_INDICATE
+                    );
+
+  // https://www.bluetooth.com/specifications/gatt/viewer?attributeXmlFile=org.bluetooth.descriptor.gatt.client_characteristic_configuration.xml
+  // Create a BLE Descriptor
+   pCharacteristic->setCallbacks(new MyCallbacks());
+
+  // Start the service
+  pService->start();
+
+  // Start advertising
+  BLEAdvertising *pAdvertising = BLEDevice::getAdvertising();
+  pAdvertising->addServiceUUID(SERVICE_UUID);
+  
+  pAdvertising->setScanResponse(false);
+  pAdvertising->setMinPreferred(0x0);  // set value to 0x00 to not advertise this parameter
+  BLEDevice::startAdvertising();
+  
     Serial.println("Waiting for a BLE connection...");
-    // Parameters are not empty, connect to WiFi and login to server
-    WiFi.begin(ssid, password);
+    
+    
+   
+
+ 
+  WiFi.begin(ssid, password);
     while (WiFi.status() != WL_CONNECTED) {
       delay(500);
       Serial.println("Connecting to WiFi...");
     }
     Serial.println("Connected to WiFi");
-    loginToServer();
+
+   // Initialize mDNS
+  if (!MDNS.begin("esp32A1")) {   // Set the hostname to "esp32.local"
+    Serial.println("Error setting up MDNS responder!");
+    while(1) {
+      delay(1000);
+    }
   }
+  Serial.println("mDNS responder started");  
+  loginToServer();
+
+  ws.onEvent(onWebSocketEvent);
+  server.addHandler(&ws);
+  server.begin();
+  
 }
+
+
 
 
 void loop() {
@@ -296,5 +353,30 @@ void loop() {
   sendDataToServer(temperatureSample);
   sendDataToServer(humiditySample);
 
+  if (newDataWritten) {
+     // Delay the restart to ensure the write operation is complete
+    delay(1000);  // Delay for 1 second
+    ESP.restart();
+    
+    
+  }
+  
   delay(10000);  // Wait for 10 seconds before collecting and sending the next data
+}
+
+void onWebSocketEvent(AsyncWebSocket *server, AsyncWebSocketClient *client, AwsEventType type, void *arg, uint8_t *data, size_t len) {
+  if (type == WS_EVT_CONNECT) {
+    Serial.println("WebSocket client connected");
+  } else if (type == WS_EVT_DISCONNECT) {
+    Serial.println("WebSocket client disconnected");
+  } else if (type == WS_EVT_DATA) {
+    AwsFrameInfo *info = (AwsFrameInfo*)arg;
+    if (info->opcode == WS_TEXT) {
+      // Handle incoming messages from the WebSocket client
+    }
+  }
+}
+
+void sendWebSocketMessage(const char *message) {
+  ws.textAll(message);
 }
